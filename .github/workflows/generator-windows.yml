@@ -145,6 +145,12 @@ jobs:
           repository: rustdesk/rustdesk
           submodules: recursive
 
+      - name: Infotec - patches e printer-adapter deste commit (nao da master do original)
+        uses: actions/checkout@v4
+        with:
+          path: ./temp-repo
+          persist-credentials: false
+
       - name: Set custom app version
         continue-on-error: true
         if: ${{ inputs.app_version != '' }}
@@ -159,7 +165,7 @@ jobs:
         if: ${{ env.update_public_key != '' }}
         shell: bash
         run: |
-          curl -sSL -o allow_custom_update.py https://raw.githubusercontent.com/bryangerlach/rdgen/refs/heads/master/.github/patches/allow_custom_update.py
+          cp ./temp-repo/.github/patches/allow_custom_update.py allow_custom_update.py
           python3 allow_custom_update.py \
             --rustdesk-root . \
             --update-url "${{ env.downloadLink}}/api/version/latest" \
@@ -318,10 +324,10 @@ jobs:
           retry_wait_seconds: 15
           shell: pwsh
           command: |
-            Invoke-WebRequest -Uri https://raw.githubusercontent.com/bryangerlach/rdgen/refs/heads/master/.github/patches/allowCustom.py -OutFile allowCustom.py
+            Copy-Item ./temp-repo/.github/patches/allowCustom.py allowCustom.py
             python allowCustom.py
             # Remove Setup Server Tip
-            Invoke-WebRequest -Uri https://raw.githubusercontent.com/bryangerlach/rdgen/refs/heads/master/.github/patches/removeSetupServerTip.diff -OutFile removeSetupServerTip.diff
+            Copy-Item ./temp-repo/.github/patches/removeSetupServerTip.diff removeSetupServerTip.diff
             git apply removeSetupServerTip.diff
 
       - name: Patch remote printer port to spool file
@@ -519,7 +525,7 @@ jobs:
           shell: pwsh
           continue_on_error: true
           command: |
-            Invoke-WebRequest -Uri https://raw.githubusercontent.com/bryangerlach/rdgen/refs/heads/master/.github/patches/xoffline.diff -OutFile xoffline.diff
+            Copy-Item ./temp-repo/.github/patches/xoffline.diff xoffline.diff
             git apply xoffline.diff
 
       - name: removeNewVersionNotif
@@ -528,7 +534,10 @@ jobs:
         shell: bash
         run: | 
           sed -i -e 's|updateUrl.isNotEmpty|false|' ./flutter/lib/desktop/pages/desktop_home_page.dart
-          sed -i '/let (request, url) =/,/Ok(())/{/Ok(())/!d}' ./src/common.rs
+          # Infotec: o sed original (apaga ate o proximo Ok(())) destruia o common.rs do 1.5.1.
+          # Troca so o corpo de do_check_software_update() por Ok(()); aceita LF e CRLF.
+          perl -0777 -pi -e 's/(pub async fn do_check_software_update\(\) -> hbb_common::ResultType<\(\)> \{\r?\n).*?\r?\n\}\r?\n/$1    Ok(())\n}\n/s' ./src/common.rs
+          grep -A2 'pub async fn do_check_software_update' ./src/common.rs
 
       # - name: run as admin
       #   continue-on-error: true
@@ -553,12 +562,6 @@ jobs:
           cp ../res/icon.ico ./windows/runner/resources/app_icon.ico
           cd ..
 
-      - name: Checkout printer-adapter crate
-        uses: actions/checkout@v4
-        with:
-          repository: bryangerlach/rdgen
-          ref: master
-          path: ./temp-repo
 
       - name: Move printer-adapter into place
         shell: pwsh
