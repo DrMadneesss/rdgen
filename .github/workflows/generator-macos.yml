@@ -58,6 +58,7 @@ jobs:
   build-for-macos:
     name: ${{ matrix.job.target }}
     runs-on: ${{ matrix.job.os }}
+    timeout-minutes: 150
     needs: [generate-bridge, setup]
     strategy:
       fail-fast: false
@@ -72,7 +73,7 @@ jobs:
             }
           - {
               target: aarch64-apple-darwin,
-              os: macos-14,
+              os: macos-15, # Infotec: era macos-14 (imagem sendo aposentada)
               # extra-build-args: "--disable-flutter-texture-render", # disable this for mac, because we see a lot of users reporting flickering both on arm and x64, and we can not confirm if texture rendering has better performance if htere is no vram, https://github.com/rustdesk/rustdesk/issues/6296
               extra-build-args: "--screencapturekit",
               arch: aarch64,
@@ -126,6 +127,12 @@ jobs:
             repository: rustdesk/rustdesk
             submodules: recursive
 
+      - name: Infotec - patches deste commit (nao da master do original)
+        uses: actions/checkout@v4
+        with:
+          path: ./temp-repo
+          persist-credentials: false
+
       - name: Set custom app version
         continue-on-error: true
         if: ${{ inputs.app_version != '' }}
@@ -140,7 +147,7 @@ jobs:
         if: ${{ env.update_public_key != '' }}
         shell: bash
         run: |
-          curl -sSL -o allow_custom_update.py https://raw.githubusercontent.com/bryangerlach/rdgen/refs/heads/master/.github/patches/allow_custom_update.py
+          cp ./temp-repo/.github/patches/allow_custom_update.py allow_custom_update.py
           python3 allow_custom_update.py \
             --rustdesk-root . \
             --update-url "${{ env.downloadLink}}/api/version/latest" \
@@ -179,6 +186,10 @@ jobs:
           # Update Xcode project settings
           sed -i '' -e 's/PRODUCT_NAME = "RustDesk"/PRODUCT_NAME = "${{ env.appname }}"/' ./flutter/macos/Runner.xcodeproj/project.pbxproj
           sed -i '' -e 's/PRODUCT_BUNDLE_IDENTIFIER = ".*"/PRODUCT_BUNDLE_IDENTIFIER = "com.${{ env.appname }}.app"/' ./flutter/macos/Runner.xcodeproj/project.pbxproj
+          # Infotec: no 1.5.1 o identificador esta sem aspas no projeto e a linha acima nao pegava; o app
+          # saia com o mesmo identificador do RustDesk oficial (com.carriez.rustdesk).
+          sed -i '' -e 's/PRODUCT_BUNDLE_IDENTIFIER = com\.carriez\.rustdesk;/PRODUCT_BUNDLE_IDENTIFIER = "com.${{ env.appname }}.app";/' ./flutter/macos/Runner.xcodeproj/project.pbxproj
+          grep -n 'PRODUCT_BUNDLE_IDENTIFIER' ./flutter/macos/Runner.xcodeproj/project.pbxproj
 
           # Update CMake settings
           if [ -f "./flutter/macos/CMakeLists.txt" ]; then
@@ -285,10 +296,13 @@ jobs:
           retry_wait_seconds: 15
           shell: bash
           command: |
-            wget https://raw.githubusercontent.com/bryangerlach/rdgen/refs/heads/master/.github/patches/allowCustom.py
-            python allowCustom.py
-            wget https://raw.githubusercontent.com/bryangerlach/rdgen/refs/heads/master/.github/patches/removeSetupServerTip.diff
+            cp ./temp-repo/.github/patches/allowCustom.py allowCustom.py
+            python3 allowCustom.py
+            cp ./temp-repo/.github/patches/removeSetupServerTip.diff removeSetupServerTip.diff
             git apply removeSetupServerTip.diff
+            # Infotec: confere que o patch entrou (sem ele o app ignora a configuracao embutida)
+            grep -n 'custom_.txt' ./src/common.rs
+            ! grep -n '5Qbwsde3unUcJBtrx9ZkvUmwFNoExHzpryHuPUdqlWM=' ./src/common.rs
             # sed -i '/intl:/a \ \ archive: ^3.6.1' ./flutter/pubspec.yaml
           
       - name: Install build runtime
@@ -504,14 +518,14 @@ jobs:
         continue-on-error: true
         if: env.xOffline == 'true'
         run: |
-          wget https://raw.githubusercontent.com/bryangerlach/rdgen/refs/heads/master/.github/patches/xoffline.diff
+          cp ./temp-repo/.github/patches/xoffline.diff xoffline.diff
           git apply xoffline.diff
 
       - name: hide-cm
         continue-on-error: true
         if: env.hidecm == 'true'
         run: |
-          wget https://raw.githubusercontent.com/bryangerlach/rdgen/refs/heads/master/.github/patches/hidecm.diff
+          cp ./temp-repo/.github/patches/hidecm.diff hidecm.diff
           git apply hidecm.diff
 
       - name: removeNewVersionNotif
@@ -519,7 +533,10 @@ jobs:
         if: env.removeNewVersionNotif == 'true'
         run: | 
           sed -i -e 's|updateUrl.isNotEmpty|false|' ./flutter/lib/desktop/pages/desktop_home_page.dart
-          sed -i '/let (request, url) =/,/Ok(())/{/Ok(())/!d}' ./src/common.rs
+          # Infotec: o sed original (apaga ate o proximo Ok(())) destruia o common.rs do 1.5.1.
+          # Troca so o corpo de do_check_software_update() por Ok(()), como no fluxo do Windows.
+          perl -0777 -pi -e 's/(pub async fn do_check_software_update\(\) -> hbb_common::ResultType<\(\)> \{\r?\n).*?\r?\n\}\r?\n/$1    Ok(())\n}\n/s' ./src/common.rs
+          grep -A2 'pub async fn do_check_software_update' ./src/common.rs
 
       - name: Restore bridge files
         uses: actions/download-artifact@master
@@ -589,8 +606,10 @@ jobs:
         run: |
           APP=$(find ./flutter/build/macos/Build/Products/Release -maxdepth 1 -name "*.app" | head -n 1)
           echo "App bundle: $APP"
-          echo -n '${{ env.custom }}' > "$APP/Contents/MacOS/custom_.txt"
-          ls -l "$APP/Contents/MacOS/custom_.txt"
+          # Infotec: no macOS o RustDesk procura o arquivo em Contents/Resources (src/common.rs,
+          # load_custom_client). Em Contents/MacOS ele nunca era lido e o app saia sem o modo so-acesso.
+          echo -n '${{ env.custom }}' > "$APP/Contents/Resources/custom_.txt"
+          ls -l "$APP/Contents/Resources/custom_.txt"
       
       - name: Install rcodesign tool
         if: env.MACOS_P12_BASE64 != null
@@ -643,7 +662,8 @@ jobs:
         continue-on-error: false
         shell: bash
         run: |
-          ASSETS_DIR="build/macos/Build/Products/Release/RustDesk.app/Contents/Frameworks/App.framework/Versions/Current/Resources/flutter_assets/assets"
+          # Infotec: o caminho antigo (./build/.../RustDesk.app) criava uma pasta solta fora do app e o logo nao entrava
+          ASSETS_DIR="flutter/build/macos/Build/Products/Release/${{ env.appname }}.app/Contents/Frameworks/App.framework/Versions/Current/Resources/flutter_assets/assets"
           mkdir -p "$ASSETS_DIR"
           curl -k -L --tlsv1.2 --proto =https --ssl-reqd \
             -H "User-Agent: Mozilla/5.0" \
@@ -737,6 +757,20 @@ jobs:
               exit 1
             fi
 
+      - name: Infotec - conferencia do app antes de empacotar
+        shell: bash
+        run: |
+          APP="flutter/build/macos/Build/Products/Release/${{ env.appname }}.app"
+          echo "identificador: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")"
+          echo "versao: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")  minimo: $(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$APP/Contents/Info.plist")"
+          ls -l "$APP/Contents/MacOS" "$APP/Contents/Resources/custom_.txt"
+          test -s "$APP/Contents/Resources/custom_.txt"
+          [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")" != "com.carriez.rustdesk" ]
+          codesign --verify --deep --strict "$APP" || echo "::warning::codesign --verify reclamou do app (veja acima)"
+          codesign -dv "$APP" 2>&1 | grep -E 'Identifier|Signature|TeamIdentifier|flags' || true
+          lipo -archs "$APP/Contents/MacOS/${{ env.appname }}" || true
+          ls "$APP/Contents/Frameworks/App.framework/Versions/Current/Resources/flutter_assets/assets" | grep -E 'logo|icon' || true
+
       - name: Create DMG
         run: |
           cd /Users/runner/work/${{ github.event.repository.name }}/${{ github.event.repository.name }}/flutter/build/macos/Build/Products/Release
@@ -783,6 +817,14 @@ jobs:
             echo "No DMG file found matching the pattern"
             exit 1
           fi
+
+      - name: Infotec - copia do dmg no GitHub
+        uses: actions/upload-artifact@v4
+        with:
+          name: cliente-dmg-${{ matrix.job.arch }}
+          path: ${{ github.workspace }}/${{ env.filename }}-${{ matrix.job.arch }}.dmg
+          retention-days: 3
+          if-no-files-found: error
 
       - name: send file to rdgen server
         if: ${{ env.rdgen == 'true' }}
